@@ -37,7 +37,7 @@ static LogicalType ListFilterBindLambda(ClientContext &context, const vector<Log
 
 ScalarFunction ListFilterFun::GetFunction() {
 	ScalarFunction fun({LogicalType::LIST(LogicalType::ANY), LogicalType::LAMBDA}, LogicalType::LIST(LogicalType::ANY),
-	                   LambdaFunctions::ListFilterFunction, ListFilterBind, nullptr, nullptr);
+	                   LambdaFunctions::ListFilterFunction, ListFilterBind, nullptr, LambdaFunctions::ListLambdaStats);
 
 	fun.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 	fun.SetSerializeCallback(ListLambdaBindData::Serialize);

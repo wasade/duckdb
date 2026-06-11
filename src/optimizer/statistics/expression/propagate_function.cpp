@@ -18,7 +18,7 @@ unique_ptr<BaseStatistics> StatisticsPropagator::PropagateExpression(BoundFuncti
 	if (!func.function.HasStatisticsCallback()) {
 		return nullptr;
 	}
-	FunctionStatisticsInput input(func, func.bind_info.get(), stats, &expr_ptr);
+	FunctionStatisticsInput input(func, func.bind_info.get(), stats, &expr_ptr, this);
 	return func.function.GetStatisticsCallback()(context, input);
 }
 

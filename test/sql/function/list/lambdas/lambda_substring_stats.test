@@ -1,0 +1,196 @@
+# name: test/sql/function/list/lambdas/lambda_substring_stats.test
+# description: Statistics propagation into lambda bodies (issue #23229): correctness of stats-gated scalar
+# description: fast paths (e.g. substring's ASCII path) selected inside list_transform/list_filter/list_reduce
+# group: [lambdas]
+
+statement ok
+SET lambda_syntax='DISABLE_SINGLE_ARROW'
+
+# enable_verification re-runs each query through several variants (including one with the optimizer disabled,
+# so the statistics pass - and the ASCII fast-path swap - never runs) and asserts identical results. The fix
+# seeds statistics into the lambda body (which can swap substring to its ASCII fast path); this verifies that
+# swap never changes results - the key guard against mis-mapping seeded statistics.
+statement ok
+PRAGMA enable_verification
+
+# ----------------------------------------------------------------------------------------------------------
+# captured ASCII column: substring at growing offsets inside a lambda (the #23229 pattern, small scale)
+# ----------------------------------------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE ascii_one AS SELECT 'abcdefghij' AS s;
+
+query I
+SELECT list_transform(range(0, length(s) // 2), lambda i: substring(s, i * 2 + 1, 2)) FROM ascii_one;
+----
+[ab, cd, ef, gh, ij]
+
+# same, but via UNNEST (exercises the LogicalUnnest statistics handler)
+query I
+SELECT unnest(list_transform(range(0, length(s) // 2), lambda i: substring(s, i * 2 + 1, 2))) FROM ascii_one;
+----
+ab
+cd
+ef
+gh
+ij
+
+# list comprehension form (sugar over list_transform)
+query I
+SELECT [substring(s, i * 2 + 1, 2) for i in range(0, length(s) // 2)] FROM ascii_one;
+----
+[ab, cd, ef, gh, ij]
+
+# ----------------------------------------------------------------------------------------------------------
+# captured UNICODE column: substring must stay character-correct (must NOT take the byte-wise ASCII path)
+# ----------------------------------------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE uni_one AS SELECT 'áéíóú' AS s;
+
+query I
+SELECT list_transform([1, 2, 3, 4, 5], lambda i: substring(s, i, 1)) FROM uni_one;
+----
+[á, é, í, ó, ú]
+
+query I
+SELECT list_transform([1, 3], lambda i: substring(s, i, 2)) FROM uni_one;
+----
+[áé, íó]
+
+# ----------------------------------------------------------------------------------------------------------
+# multi-capture mis-mapping guard: an ASCII column and a UNICODE column in the SAME lambda body.
+# The ASCII column may use the fast path; the UNICODE column must remain character-correct. If the ASCII
+# column's "no unicode" statistics were mis-seeded onto the unicode reference, the unicode output would be
+# byte-truncated (garbled).
+# ----------------------------------------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE multi AS SELECT 'abcdef' AS a_col, 'áéíóúü' AS u_col;
+
+# offsets start at 2 so byte-truncation of the 2-byte unicode chars can never coincide with the correct result
+query I
+SELECT list_transform([2, 3, 4], lambda i: substring(a_col, i, 2) || '|' || substring(u_col, i, 2)) FROM multi;
+----
+[bc|éí, cd|íó, de|óú]
+
+# reversed capture order
+query I
+SELECT list_transform([2, 3, 4], lambda i: substring(u_col, i, 2) || '|' || substring(a_col, i, 2)) FROM multi;
+----
+[éí|bc, íó|cd, óú|de]
+
+# three captures (two ASCII, one unicode): only with >= 3 captures can a *shift* of the capture indices be
+# distinguished from a *swap*. Any mis-index moves the ASCII "no unicode" stats onto the unicode reference and
+# byte-garbles its output.
+statement ok
+CREATE TABLE three_cap AS SELECT 'abc' AS a1, 'def' AS a2, 'áéí' AS u1;
+
+query I
+SELECT list_transform([1, 2, 3], lambda i: substring(a1, i, 1) || substring(a2, i, 1) || substring(u1, i, 1)) FROM three_cap;
+----
+[adá, beé, cfí]
+
+# ----------------------------------------------------------------------------------------------------------
+# element-seeding path: list elements are strings (not captures); substring of the element inside the lambda
+# ----------------------------------------------------------------------------------------------------------
+
+query I
+SELECT list_transform(['café', 'abcd'], lambda x: substring(x, 2, 2));
+----
+[af, bc]
+
+# two-parameter lambda (element + index): substring of a captured column, parameter_count = 2
+query I
+SELECT list_transform([10, 20], lambda v, i: substring(s, i, 2)) FROM ascii_one;
+----
+[ab, bc]
+
+# ----------------------------------------------------------------------------------------------------------
+# list_filter with substring over a captured column
+# ----------------------------------------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE filt AS SELECT 'aXbXcX' AS s;
+
+query I
+SELECT list_filter([1, 2, 3, 4, 5, 6], lambda i: substring(s, i, 1) = 'X') FROM filt;
+----
+[2, 4, 6]
+
+# list_filter with the index parameter (parameter_count = 2): substring of a captured column at the index
+query I
+SELECT list_filter([1, 2, 3, 4, 5], lambda x, i: substring(s, i, 1) != 'X') FROM filt;
+----
+[1, 3, 5]
+
+# ----------------------------------------------------------------------------------------------------------
+# list_reduce with substring (no initial value, with initial value, and capturing a column)
+# ----------------------------------------------------------------------------------------------------------
+
+query I
+SELECT list_reduce(['ab', 'cd', 'ef'], lambda acc, x: acc || substring(x, 1, 1));
+----
+abce
+
+query I
+SELECT list_reduce(['ab', 'cd'], lambda acc, x: acc || substring(x, 2, 1), 'Z');
+----
+Zbd
+
+statement ok
+CREATE TABLE red AS SELECT '>' AS p;
+
+query I
+SELECT list_reduce(['ab', 'cd'], lambda acc, x: acc || p || substring(x, 1, 1), 'Z') FROM red;
+----
+Z>a>c
+
+# three-parameter list_reduce (parameter_count = 3, has_index): element_ref_index differs from the 2-param form,
+# so this exercises a distinct capture/element index mapping; substring of a captured column at the index
+statement ok
+CREATE TABLE redidx AS SELECT 'abcd' AS s;
+
+query I
+SELECT list_reduce(['x', 'y', 'z'], lambda acc, x, i: acc || substring(s, i, 1), '') FROM redidx;
+----
+abc
+
+# list_reduce WITH initial value, substring of a captured column (the initial value interposes between the list
+# and the captures in the children layout - guards the capture-index offset for has_initial)
+statement ok
+CREATE TABLE redcap AS SELECT 'XYZ' AS asc_s, 'áéí' AS uni_s;
+
+query I
+SELECT list_reduce(['a', 'b'], lambda acc, x: acc || substring(asc_s, 2, 1), 'Q') FROM redcap;
+----
+QYY
+
+query I
+SELECT list_reduce(['a', 'b'], lambda acc, x: acc || substring(uni_s, 2, 1), 'Q') FROM redcap;
+----
+Qéé
+
+# ----------------------------------------------------------------------------------------------------------
+# ARRAY input (cast to LIST at bind time) and edge cases: NULL list, empty list, nested lambdas
+# ----------------------------------------------------------------------------------------------------------
+
+query I
+SELECT list_transform(['ab', 'cd']::VARCHAR[2], lambda x: substring(x, 1, 1));
+----
+[a, c]
+
+query I
+SELECT list_transform(NULL::VARCHAR[], lambda x: substring(x, 1, 1));
+----
+NULL
+
+query I
+SELECT list_transform([]::VARCHAR[], lambda x: substring(x, 1, 1));
+----
+[]
+
+query I
+SELECT list_transform(['ab', 'cd'], lambda x: list_transform([1, 2], lambda j: substring(x, j, 1)));
+----
+[[a, b], [c, d]]

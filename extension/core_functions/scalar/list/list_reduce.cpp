@@ -219,6 +219,11 @@ unique_ptr<FunctionData> ListReduceBind(ClientContext &context, ScalarFunction &
 		throw BinderException("list_reduce expects a function with 2 or 3 arguments");
 	}
 	auto has_index = bound_lambda_expr.parameter_count == 3;
+	auto parameter_count = bound_lambda_expr.parameter_count;
+	auto capture_count = bound_lambda_expr.captures.size();
+	// for list_reduce the list element is the second lambda parameter (column 1); column 0 is the accumulator,
+	// so the element's body reference index is parameter_count - 2 (see BindReduceChildren)
+	auto element_ref_index = parameter_count - 2;
 
 	auto cast_lambda_expr =
 	    BoundCastExpression::AddCastToType(context, std::move(bound_lambda_expr.lambda_expr), list_child_type);
@@ -227,7 +232,7 @@ unique_ptr<FunctionData> ListReduceBind(ClientContext &context, ScalarFunction &
 	}
 	bound_function.SetReturnType(cast_lambda_expr->return_type);
 	return make_uniq<ListLambdaBindData>(bound_function.GetReturnType(), std::move(cast_lambda_expr), has_index,
-	                                     has_initial);
+	                                     has_initial, parameter_count, capture_count, element_ref_index);
 }
 
 LogicalType BindReduceChildren(ClientContext &context, const vector<LogicalType> &function_child_types,
@@ -311,7 +316,7 @@ void LambdaFunctions::ListReduceFunction(DataChunk &args, ExpressionState &state
 
 ScalarFunctionSet ListReduceFun::GetFunctions() {
 	ScalarFunction fun({LogicalType::LIST(LogicalType::ANY), LogicalType::LAMBDA}, LogicalType::ANY,
-	                   LambdaFunctions::ListReduceFunction, ListReduceBind, nullptr, nullptr);
+	                   LambdaFunctions::ListReduceFunction, ListReduceBind, nullptr, LambdaFunctions::ListLambdaStats);
 
 	fun.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 	fun.SetSerializeCallback(ListLambdaBindData::Serialize);
