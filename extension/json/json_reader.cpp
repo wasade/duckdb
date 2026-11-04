@@ -1341,6 +1341,8 @@ bool JSONReader::ReadNextBufferNoSeek(JSONReaderScanState &scan_state) {
 	}
 	scan_state.is_last = read_size == 0;
 	if (scan_state.is_last) {
+		// GetProgress reads the handle under the reader lock, so it must not be destroyed outside it
+		lock_guard<mutex> guard(lock);
 		file_handle.Close();
 	}
 	scan_state.buffer_size = read_offset + read_size;

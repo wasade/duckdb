@@ -1,0 +1,20 @@
+# name: test/sql/json/table/read_json_compressed_progress.test
+# description: Polling query progress while a scan closes a compressed (non-newline-delimited) JSON file
+# group: [table]
+
+require json
+
+statement ok
+COPY (SELECT 42 AS x) TO '{TEST_DIR}/progress_close.json.gz' (ARRAY true);
+
+statement ok
+SET enable_progress_bar = true;
+
+loop i 0 1000
+
+query I
+SELECT count(*) FROM '{TEST_DIR}/progress_close.json.gz';
+----
+1
+
+endloop
